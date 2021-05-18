@@ -25,13 +25,15 @@ def init_gateway():
     config = load_config()
     target = (config.dest.hostname, config.dest.port)
     local = (config.src.hostname, config.src.port)
+    localPull = (config.src.hostname, config.src.pullport)
     gateway_file = pathlib.Path('config/gateway.yml')
     with open(gateway_file) as f:
         gateway_conf = yaml.load(f, Loader=yaml.FullLoader)
     gweui = gateway_conf.get('GatewayEUI')
     gateway = mac.Gateway(gweui)
     udp_client = network.UDPClient(target, address=local, timeout=config.timeout)
-    return gateway, udp_client
+    udp_client_pull = network.UDPClient(target, address=localPull, timeout=config.timeout)
+    return gateway, udp_client, udp_client_pull
 
 
 def init_mote(args):
@@ -77,9 +79,9 @@ def main():
     logger = logging.getLogger('main')
     try:
         args = define_parser().parse_args()
-        gateway, udp_client = init_gateway()
+        gateway, udp_client, udp_client_pull = init_gateway()
         if args.type == 'pull':
-            gateway.pull(udp_client)
+            gateway.pull(udp_client_pull)
         else:
             mote = init_mote(args)
             if args.type == 'info':
@@ -110,7 +112,7 @@ def main():
                     phypld = mote.form_phypld(fport, bytes.fromhex(args.cmd), unconfirmed=args.unconfirmed)
                 else:
                     raise NotImplementedError
-                gateway.push(udp_client, phypld, mote)
+                gateway.push(udp_client, udp_client_pull, phypld, mote)
     except socket.timeout as e:
         logger.error('Socket Timeout, remote server is unreachable')
     except AttributeError as e:

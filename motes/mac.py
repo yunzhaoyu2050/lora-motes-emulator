@@ -125,7 +125,7 @@ class Gateway:
                 "tmst": int(time.time()),
                 "chan": mote.txch,
                 "rfch": mote.txch,
-                "freq": 868.3,
+                "freq": 470.3,
                 "stat": 1,
                 "modu": 'LORA',
                 "datr": self.txdr2datr[mote.txdr],
@@ -226,8 +226,8 @@ class Gateway:
         -------------------------------------
         """
         pullack = memoryview(pullack)
-        pullack_f = '<s2ss'
-        version, token, identifier = parse_bytes(
+        pullack_f = '<s2ss8s'
+        version, token, identifier,gatewayEui = parse_bytes(
             'PULL_ACK',
             pullack_f,
             pullack
@@ -236,10 +236,12 @@ class Gateway:
             ('PULL ACK -\nVersion: {}, '
                 'Token: {}, '
                 'Identifier: {}, '
+                'GatewayEui: {}, '
                 ).format(
                     version.hex(),
                     token.hex(),
                     identifier.hex(),
+                    gatewayEui.hex()
                 ))
 
     def form_pshdat(self, data, mote):
@@ -280,7 +282,7 @@ class Gateway:
             payload,
         ])
 
-    def push(self, transmitter, data, mote):
+    def push(self, transmitter, transmitterPull, data, mote):
         """
         Sending PUSH_DATA from gateway to server.
         Args:
@@ -295,7 +297,7 @@ class Gateway:
         pushack = transmitter.recv()
         self.parse_pushack(pushack[0])
         try:
-            pullresp = transmitter.recv()
+            pullresp = transmitterPull.recv()
         except socket.timeout as e:
             logger.info(
                 ('No response is received from remote servers')
@@ -356,6 +358,7 @@ class Gateway:
             pullresp_f,
             pullresp,
         )
+        print("recv pullresp:", pullresp)
         txpk = json.loads(txpk.decode('ascii'))['txpk']
         logger.info(
             ('Receiving a PULL RESP - \n'
@@ -410,6 +413,8 @@ class Gateway:
         ------------------------------
         """
         phypld = memoryview(base64.b64decode(txpk.get('data')))
+        print("txpk.get('data'):", txpk.get('data'))
+        print("base64.b64decode(txpk.get('data')):", base64.b64decode(txpk.get('data')).hex())
         mote.parse_phypld(phypld)
         
 
@@ -688,6 +693,9 @@ class Mote:
                 )
         fhdr_f = fhdr_f + '{}s'.format(foptslen)
         fctrl = self.form_fctrl(foptslen, self.ack)
+        print("devaddr:", self.devaddr[::-1].hex())
+        print("self.fcntup:", self.fcntup)
+        print("fopts:", fopts)
         return struct.calcsize(fhdr_f), struct.pack(fhdr_f, self.devaddr[::-1], fctrl, self.fcntup, fopts)
 
     def parse_fhdr(self, macpld):
@@ -763,11 +771,14 @@ class Mote:
         ])
         msglen = len(msg)
         B_f = '<cHBBB4sIBB'
+        print("direction:", direction)
         if direction == 0:
             fcnt = self.fcntup
             key = self.fnwksintkey
         else:
             key = self.snwksintkey
+        print("self.fnwksintkey:", self.fnwksintkey.hex())
+        print("self.snwksintkey:", self.snwksintkey.hex())
         conffcnt = fcnt if (self.ack and direction == 1) else 0
         B0_elements = [
             b'\x49',
@@ -784,10 +795,14 @@ class Mote:
             B_f,
             *B0_elements,
         )
+        print("B0:", B0.hex())
         fmsg = B0 + msg
+        print("fmsg:", fmsg.hex())
+        print("key:", key.hex())
         fcmacobj = CMAC.new(key, ciphermod=AES)
         fcmac = fcmacobj.update(fmsg)
-        if direction == 0:
+        # print("fcmac:", fcmac)
+        if direction == 1: # TODO: 
             B1_elements = B0_elements[:]
             conffcnt = fcnt if self.ack else 0
             B1_elements[1:4] = [conffcnt, self.txdr, self.txch]
@@ -796,9 +811,10 @@ class Mote:
                 *B1_elements,
             )
             smsg = B1 + msg
-            #print('msg: \nB0: {} \nB1: {}'.format(fmsg.hex(), smsg.hex()))
+            print('msg: \nB0: {} \nB1: {}'.format(fmsg.hex(), smsg.hex()))
             scmacobj = CMAC.new(self.snwksintkey, ciphermod=AES)
             scmac = scmacobj.update(smsg)
+            # cobj.digest()[:MIC_LEN]
             return scmac.digest()[:MIC_LEN//2] + fcmac.digest()[:MIC_LEN//2]
         else:
             return fcmac.digest()[:MIC_LEN]
@@ -904,7 +920,7 @@ class Mote:
             bytes of decrypted join accept message
 
         Decryption keys:
-        ----------------------
+        ----------------------  
         | ReqType |   Key    |
         ----------------------
         |  Join   |  NwkKey  |
@@ -914,8 +930,13 @@ class Mote:
         """
         macpldlen = len(macpld)
         macpld = macpld.ljust(AES_BLOCK, b'\x00')
+        print("macpld:", macpld.hex())
+        print("self.joinenckey:", self.joinenckey.hex())
         cryptor = AES.new(self.joinenckey, AES.MODE_ECB)
-        return cryptor.encrypt(macpld)
+        res = cryptor.encrypt(macpld) ##  encrypt(macpld) 
+        ret = res[0:16] # TODO:
+        print("ret:", ret.hex())
+        return ret
 
     def encrypt(self, key, payload, direction=0, fcnt=0, start=1):
         """
@@ -935,13 +956,17 @@ class Mote:
         | 0x01 | 4 X 0x00 | Direction | DevAddr | FCnt | 0x00 | i |
         -----------------------------------------------------------
         """
+        print(" encrypt:")
+        print(" payload:", payload.hex())
         pldlen = len(payload)
         k = math.ceil(pldlen / AES_BLOCK)
+        print("     k:",k)
         payload = payload.ljust(AES_BLOCK * k, b'\x00')
         cryptor = AES.new(key, AES.MODE_ECB)
         S = b''
         ai_f = '<cIB4sIBB'
         fcnt = self.fcntup if direction == 0 else fcnt
+        print(" key:", key.hex())
         for i in range(start, k + start):
             Ai = struct.pack(
                 ai_f,
@@ -953,9 +978,47 @@ class Mote:
                 0,
                 i
             )
+            print(" Ai:", Ai.hex())
             Si = cryptor.encrypt(Ai)
+            print(" Si:", Si.hex())
             S += Si
-        return Mote.bytes_xor(S, payload)[:pldlen]
+        print(" S:", S.hex())
+        out = Mote.bytes_xor(S, payload)[:pldlen]
+        print(" out:", Mote.bytes_xor(S, payload)[:pldlen].hex())
+
+        # 测试解密操作
+        payload = Mote.bytes_xor(S, payload)[:pldlen]
+        print(" payload:", payload.hex())
+        pldlen = len(payload)
+        k = math.ceil(pldlen / AES_BLOCK)
+        print(" k:",k)
+        payload = payload.ljust(AES_BLOCK * k, b'\x00')
+        cryptor = AES.new(key, AES.MODE_ECB)
+        S = b''
+        ai_f = '<cIB4sIBB'
+        fcnt = self.fcntup if direction == 0 else fcnt
+        print(" key:", key.hex())
+        for i in range(start, k + start):
+            Ai = struct.pack(
+                ai_f,
+                b'\x01',
+                0,
+                direction,
+                self.devaddr[::-1],
+                fcnt,
+                0,
+                i
+            )
+            print(" Ai:", Ai.hex())
+            Si = cryptor.decrypt(Ai)
+            print(" Si:", Si.hex())
+            S += Si
+        print(" S:", S.hex())
+        print(" payload:", payload.hex())
+        print(" out:", Mote.bytes_xor(S, payload)[:pldlen])
+
+
+        return out
 
     def gen_keys(self, root, keymsgs: tuple, mode=AES.MODE_ECB):
         """
@@ -1081,15 +1144,28 @@ class Mote:
             joinacpt[:JOINACPT_CFLIST_OFFSET]
         )
         self.devaddr = self.devaddr[::-1]
+        # print_hex("self.devaddr:", self.devaddr)
+        # for i in self.devaddr:
+	    #     print('%#x'%ord(i))
+        print("self.devaddr:", self.devaddr.hex())
         self.joinnonce = self.joinnonce[::-1]
+        # print_hex("self.joinnonce:", self.joinnonce)
+        print("self.joinnonce:", self.joinnonce.hex())
         self.homenetid = self.homenetid[::-1]
-        print(self.homenetid)
+        # print_hex("self.homenetid:", self.homenetid)
+        print("self.homenetid:", self.homenetid.hex())
+
         # Check OptNeg flag in DLSettings
         optneg, self.rx1droffset, self.rx2dr = self.parse_dlsettings(self.dlsettings)
+        print("optneg:", optneg)
         if optneg:
             joinacpt_mic_key = self.jsintkey
         else:
             joinacpt_mic_key = self.nwkkey
+        # joinacpt_mic_key = self.nwkkey
+        print("self.nwkkey:", self.nwkkey.hex())
+        print("joinacpt_mic_key:", joinacpt_mic_key.hex())
+        print(mhdr.tobytes() + joinacpt.tobytes())
         cmic = self.calcmic_join(
             key=joinacpt_mic_key,
             macpld=mhdr.tobytes() + joinacpt.tobytes(),
@@ -1168,17 +1244,30 @@ class Mote:
         phypld = memoryview(phypld)
         mhdr = phypld[:MHDR_LEN]
         mtype, _, major = self.parse_mhdr(mhdr)
+        print("mtype, _, major:", mtype, major)
         if mtype == 1:
+            print("mtype is Join accept")
             encrypted_phypld = phypld[MHDR_LEN:]
             macpldmic = self.joinacpt_decrypt(encrypted_phypld.tobytes())
-            msglen = len(phypld)
-            pldlen = msglen - MHDR_LEN - MIC_LEN  # MHDR 1 byte, MIC 4 bytes
-            pullresp_f = '<{}s{}s'.format(pldlen, MIC_LEN)
+            print("macpldmic:", macpldmic.hex())
+            # msglen = len(phypld)
+            # # msglen = len(macpldmic)
+            # pldlen = msglen - MHDR_LEN - MIC_LEN  # MHDR 1 byte, MIC 4 bytes
+            # pullresp_f = '<{}s{}s'.format(pldlen, MIC_LEN)
+            # # pullresp_f = '<{}s{}s'.format(msglen, MIC_LEN)
+            # macpld, mic = parse_bytes('Join Accept PHYPayload', pullresp_f, macpldmic)
+
+            macpldmiclen = len(macpldmic)
+            pidlen = macpldmiclen - MIC_LEN
+            pullresp_f = '<{}s{}s'.format(pidlen, MIC_LEN)
             macpld, mic = parse_bytes('Join Accept PHYPayload', pullresp_f, macpldmic)
+
+            print("macpld, mic:", macpld.hex(), mic.hex())
             self.parse_joinacpt(mhdr, macpld, mic)
         else:  # PULL RESP for app phypayload
             macpld = phypld[MHDR_LEN:-MIC_LEN]
             mic = phypld[-MIC_LEN:]
+            print("macpld:", macpld.hex())
             self.parse_macpld(mtype, mhdr, macpld, mic)
 
     def parse_macpld(self, mtype, mhdr, macpld, mic):
@@ -1259,6 +1348,8 @@ class Mote:
         else:
             mhdr = b'\x80'
         fhdrlen, fhdr = self.form_fhdr(fopts, self.version)
+        print("fhdrlen, fhdr:", fhdrlen, fhdr.hex())
+        print("frmpld:", frmpld.hex())
         frmpldlen = len(frmpld)
         phypld_f = '<s{fhdrlen}sB{frmpldlen}s4s'.format(
             fhdrlen=fhdrlen,
@@ -1268,6 +1359,10 @@ class Mote:
             enckey = self.nwksenckey
         else:
             enckey = self.appskey
+        
+        print("     enckey:", enckey.hex())
+        print("     frmpld:", frmpld.hex())
+        print("     direction=0")
         frmpld = self.encrypt(
             enckey,
             frmpld,
