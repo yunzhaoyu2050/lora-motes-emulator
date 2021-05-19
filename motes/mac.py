@@ -780,9 +780,23 @@ class Mote:
         print("self.fnwksintkey:", self.fnwksintkey.hex())
         print("self.snwksintkey:", self.snwksintkey.hex())
         conffcnt = fcnt if (self.ack and direction == 1) else 0
+        # lorawan 1.1版本
+        # B0_elements = [
+        #     b'\x49',
+        #     conffcnt,
+        #     0,
+        #     0,
+        #     direction,
+        #     self.devaddr[::-1],
+        #     fcnt,
+        #     0,
+        #     msglen
+        # ]
+
+        # lorawan 1.0版本
         B0_elements = [
             b'\x49',
-            conffcnt,
+            0,
             0,
             0,
             direction,
@@ -802,20 +816,22 @@ class Mote:
         fcmacobj = CMAC.new(key, ciphermod=AES)
         fcmac = fcmacobj.update(fmsg)
         # print("fcmac:", fcmac)
-        if direction == 1: # TODO: 
-            B1_elements = B0_elements[:]
-            conffcnt = fcnt if self.ack else 0
-            B1_elements[1:4] = [conffcnt, self.txdr, self.txch]
-            B1 = struct.pack(
-                B_f,
-                *B1_elements,
-            )
-            smsg = B1 + msg
-            print('msg: \nB0: {} \nB1: {}'.format(fmsg.hex(), smsg.hex()))
-            scmacobj = CMAC.new(self.snwksintkey, ciphermod=AES)
-            scmac = scmacobj.update(smsg)
-            # cobj.digest()[:MIC_LEN]
-            return scmac.digest()[:MIC_LEN//2] + fcmac.digest()[:MIC_LEN//2]
+        if direction == 1:
+            print("fcmac:", fcmac.digest()[:MIC_LEN].hex())
+            # B1_elements = B0_elements[:]
+            # conffcnt = fcnt if self.ack else 0
+            # B1_elements[1:4] = [conffcnt, self.txdr, self.txch]
+            # B1 = struct.pack(
+            #     B_f,
+            #     *B1_elements,
+            # )
+            # smsg = B1 + msg
+            # print('msg: \nB0: {} \nB1: {}'.format(fmsg.hex(), smsg.hex()))
+            # scmacobj = CMAC.new(self.snwksintkey, ciphermod=AES)
+            # scmac = scmacobj.update(smsg)
+            # # cobj.digest()[:MIC_LEN]
+            # return scmac.digest()[:MIC_LEN//2] + fcmac.digest()[:MIC_LEN//2]
+            return fcmac.digest()[:MIC_LEN]
         else:
             return fcmac.digest()[:MIC_LEN]
 
@@ -1323,6 +1339,7 @@ class Mote:
                     '\tFPort: {}, '
                     '\tPayload: {}').format(
                         fhdr_d,
+                        fcntdown,
                         fport,
                         frmpld.hex(),
                     ))
